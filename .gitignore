@@ -1,0 +1,4 @@
+# --- Python bytecode / caches (anywhere in the repo) ---
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
