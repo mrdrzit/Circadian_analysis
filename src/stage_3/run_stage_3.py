@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.lines import Line2D
 from circadipy import chrono_plotter as chp
-from src.utils.io_utils import load_protocol, validate_group_metadata, ensure_group_metadata, compute_ci, plot_with_ci, load_cosinor, fig_exists
+from src.utils.io_utils import load_protocol, validate_group_metadata, ensure_group_metadata, compute_ci, plot_with_ci, load_cosinor, fig_exists, create_prism_table
 from config.analysis_config import ACTOGRAM_FIGURES_DIR, COSINOR_DIR, TIME_SERIES_FIGURES_DIR, STAGE2_DIR, EXPORTS, GROUPS_METADATA_PATH, NORM_TYPE
 
 # ---- suppress circadipy/pandas FutureWarnings (like "closed" -> "inclusive") ----
@@ -24,8 +24,10 @@ PLOT_FINAL_GROUP_FIGURES = True
 PLOT_FINAL_INDIVIDUAL_FIGURES = True
 PLOT_COSINOR_DATA_AND_ACTOGRAMS = True
 FORCE_PLOTS = False
+EXCLUDE_MESOR_OUTLIERS = True  # Remove days where mesor is statistical outlier (IQR method)
+EXPORT_PRISM_TABLES = True
 NORM_TAG = f"NORM-{NORM_TYPE}"
-USE_NORMALIZED = True   # True -> load *_NORM-zscore.pkl; False -> load raw
+USE_NORMALIZED = False   # True -> load *_NORM-zscore.pkl; False -> load raw
 COSINOR_VARIANT_DIR = COSINOR_DIR / (f"norm_{NORM_TYPE}" if USE_NORMALIZED else "raw")
 COSINOR_FIGURES_DIR = EXPORTS / "figures" / "cosinor" / (f"norm_{NORM_TYPE}" if USE_NORMALIZED else "raw")
 ACTOGRAM_FIGURES_DIR.mkdir(parents=True, exist_ok=True)
@@ -316,26 +318,6 @@ if PLOT_FINAL_INDIVIDUAL_FIGURES:
                 x = df[p].values
                 ax.plot(x, days, color="black", linewidth=1.5)
 
-                # # ---- CI shading (if available) ----
-                # if p == "acrophase_zt":
-                #     # You already have lower/upper columns
-                #     if "acrophase_zt_lower" in df.columns and "acrophase_zt_upper" in df.columns:
-                #         lo = df["acrophase_zt_lower"].values
-                #         hi = df["acrophase_zt_upper"].values
-                #         ax.fill_betweenx(days, lo, hi, alpha=0.25)
-                # elif p == "mesor" and "CI(mesor)" in df.columns:
-                #     ci = df["CI(mesor)"].apply(_parse_ci_cell)
-                #     lo = [t[0] for t in ci]
-                #     hi = [t[1] for t in ci]
-                #     if any(v is not None for v in lo) and any(v is not None for v in hi):
-                #         ax.fill_betweenx(days, lo, hi, alpha=0.25)
-                # elif p == "amplitude" and "CI(amplitude)" in df.columns:
-                #     ci = df["CI(amplitude)"].apply(_parse_ci_cell)
-                #     lo = [t[0] for t in ci]
-                #     hi = [t[1] for t in ci]
-                #     if any(v is not None for v in lo) and any(v is not None for v in hi):
-                #         ax.fill_betweenx(days, lo, hi, alpha=0.25)
-
                 ax.set_yticks(np.linspace(days[0], days[-1], min(len(days), 6), dtype=int))
                 ax.invert_yaxis()  # day 1 at top (same as original)
 
@@ -344,6 +326,10 @@ if PLOT_FINAL_INDIVIDUAL_FIGURES:
                     ax.set_xlim(0, 24)
                 elif p == "period":
                     ax.set_xlim(20, 28)
+                elif p == "mesor" and parameter.lower() == "temp":
+                    ax.set_xlim(32,40)
+                elif p == "amplitude" and parameter.lower() == "temp":
+                    ax.set_xlim(0,5)
 
             axes[0].set_ylabel("DAYS")
 
@@ -403,7 +389,25 @@ if PLOT_FINAL_GROUP_FIGURES:
             relevant_params_df["group"] = GROUP_METADATA[animal]["group"]
             relevant_params_df["day"] = np.arange(1, len(relevant_params_df) + 1)
             relevant_params_df["parameter"] = parameter
-
+            
+            # Remove mesor outliers using IQR method if enabled
+            if EXCLUDE_MESOR_OUTLIERS and "mesor" in relevant_params_df.columns:
+                mesor_values = relevant_params_df["mesor"].dropna()
+                if len(mesor_values) > 3:  # Need at least a few points
+                    Q1 = mesor_values.quantile(0.25)
+                    Q3 = mesor_values.quantile(0.75)
+                    IQR = Q3 - Q1
+                    lower_bound = Q1 - 1.5 * IQR
+                    upper_bound = Q3 + 1.5 * IQR
+                    initial_len = len(relevant_params_df)
+                    relevant_params_df = relevant_params_df[
+                        (relevant_params_df["mesor"] >= lower_bound) & 
+                        (relevant_params_df["mesor"] <= upper_bound)
+                    ].copy()
+                    outliers_removed = initial_len - len(relevant_params_df)
+                    if outliers_removed > 0:
+                        print(f"[INFO] Removed {outliers_removed} mesor outlier(s) for {animal} {parameter}")
+            
             all_individual_values.extend(
                 relevant_params_df.to_dict(orient="records")
             )
@@ -414,6 +418,41 @@ if PLOT_FINAL_GROUP_FIGURES:
     missing = excluded - set(concatenated_protocols.keys())
     if missing:
         print(f"[WARNING] group_metadata excludes animals not found in Stage2: {sorted(missing)}")
+
+    # ------------------------------------------------------------------
+    # Prism exports (Tables to copy and paste into GraphPad Prism)
+    # ------------------------------------------------------------------
+
+    if EXPORT_PRISM_TABLES and not all_individual_df.empty:
+        prism_dir = (EXPORTS / "prism")
+        prism_dir.mkdir(parents=True, exist_ok=True)
+
+        # Make sure day numbering is correct PER animal PER parameter
+        # (critical: do NOT cumcount only by animal, or ALE+TEMP will mix)
+        all_individual_df = all_individual_df.sort_values(["parameter", "animal", "day"]).copy()
+        all_individual_df["int_day"] = (
+            all_individual_df.groupby(["parameter", "animal"]).cumcount() + 1
+        )
+
+        prism_params = ["acrophase_zt", "mesor", "amplitude", "period"]
+
+        for param_type in ("ALE", "TEMP"):
+            df_param_type = all_individual_df[all_individual_df["parameter"] == param_type].copy()
+            if df_param_type.empty:
+                print(f"[INFO] Prism export: no rows for {param_type}, skipping.")
+                continue
+
+            for value_col in prism_params:
+                if value_col not in df_param_type.columns:
+                    print(f"[WARNING] Prism export: missing column {value_col} for {param_type}, skipping.")
+                    continue
+
+                slim = df_param_type[["animal", "group", "int_day", value_col]].copy()
+                prism_table = create_prism_table(slim)
+
+                out_path = prism_dir / f"prism_{param_type}_{value_col}.xlsx"
+                prism_table.to_excel(out_path, index=False)
+                print(f"[OK] Prism export saved: {out_path}")
 
     # ------------------------------------------------------------------
     # Group separation and plotting (per parameter)
@@ -430,7 +469,7 @@ if PLOT_FINAL_GROUP_FIGURES:
             continue
 
         ctrl_data = param_df[param_df["group"].str.lower() == "control"]
-        hipo_data = param_df[param_df["group"].str.lower() == "hipo"]
+        hipo_data = param_df[param_df["group"].str.lower() == "hypo"]
 
         if ctrl_data.empty or hipo_data.empty:
             print(
@@ -479,16 +518,42 @@ if PLOT_FINAL_GROUP_FIGURES:
         FIG_DIR.mkdir(parents=True, exist_ok=True)
 
         parameters = ["acrophase_zt", "mesor", "amplitude", "period"]
-        xlabels = ["ZT or CT", "COUNTS", "COUNTS", "HOURS"]
+
+        if parameter.lower() == "ale":
+            xlabels = ["ZT or CT", "COUNTS", "COUNTS", "HOURS"]
+        elif parameter.lower() == "temp":
+            xlabels = ["ZT or CT", "TEMPERATURE", "TEMPERATURE", "HOURS"]
+        
         titles = ["ACROPHASE", "MESOR", "AMPLITUDE", "PERIOD"]
 
         # ---- CONTROL ----
         ctrl_fig, ctrl_ax = plt.subplots(1, 4, figsize=(12, 8))
         for i, (param, xlabel, title) in enumerate(zip(parameters, xlabels, titles)):
             ax = ctrl_ax[i]
-            plot_with_ci(ax, grouped_CTRL_data, ci_CTRL_df, param, "#9e9e9e", "CONTROL", show_ci=False)
+            plot_with_ci(ax, grouped_CTRL_data, ci_CTRL_df, param, "#9e9e9e", "CONTROL", show_ci=True)
             ax.set_title(title)
             ax.set_xlabel(xlabel)
+
+            # Define X-axis limits and ticks based on parameter
+            if param == "acrophase_zt":
+                ax.set_xlim(0, 24)
+                ax.set_xticks([0, 6, 12, 18, 24])
+            elif param == "period":
+                ax.set_xlim(22, 26)
+                ax.set_xticks([22, 23, 24, 25, 26])
+            elif param == "mesor" and parameter.lower() == "temp":
+                ax.set_xlim(32, 42)
+                ax.set_xticks([32, 34, 36, 38, 40, 42])
+            elif param == "mesor" and parameter.lower() == "ale":
+                ax.set_xlim(0, 50)
+                ax.set_xticks([0, 12.5, 25, 37.5, 50])
+            elif param == "amplitude" and parameter.lower() == "temp":
+                ax.set_xlim(0, 2)
+                ax.set_xticks([0, 0.5, 1.0, 1.5, 2.0])
+            elif param == "amplitude" and parameter.lower() == "ale":
+                ax.set_xlim(0, 50)
+                ax.set_xticks([0, 10, 20, 30, 40, 50])
+
             ax.invert_yaxis()
 
         ctrl_ax[0].set_ylabel("DAYS")
@@ -506,10 +571,32 @@ if PLOT_FINAL_GROUP_FIGURES:
         hipo_fig, hipo_ax = plt.subplots(1, 4, figsize=(12, 8))
         for i, (param, xlabel, title) in enumerate(zip(parameters, xlabels, titles)):
             ax = hipo_ax[i]
-            plot_with_ci(ax, grouped_HIPO_data, ci_HIPO_df, param, "#f7a3a3", "HIPO", show_ci=False)
+            plot_with_ci(ax, grouped_HIPO_data, ci_HIPO_df, param, "#f7a3a3", "HIPO", show_ci=True)
             ax.set_title(title)
             ax.set_xlabel(xlabel)
+
+            # Define X-axis limits and ticks based on parameter
+            if param == "acrophase_zt":
+                ax.set_xlim(0, 24)
+                ax.set_xticks([0, 6, 12, 18, 24])
+            elif param == "period":
+                ax.set_xlim(22, 26)
+                ax.set_xticks([22, 23, 24, 25, 26])
+            elif param == "mesor" and parameter.lower() == "temp":
+                ax.set_xlim(32, 42)
+                ax.set_xticks([32, 34, 36, 38, 40, 42])
+            elif param == "mesor" and parameter.lower() == "ale":
+                ax.set_xlim(0, 50)
+                ax.set_xticks([0, 12.5, 25, 37.5, 50])
+            elif param == "amplitude" and parameter.lower() == "temp":
+                ax.set_xlim(0, 2)
+                ax.set_xticks([0, 0.5, 1.0, 1.5, 2.0])
+            elif param == "amplitude" and parameter.lower() == "ale":
+                ax.set_xlim(0, 50)
+                ax.set_xticks([0, 10, 20, 30, 40, 50])
+            
             ax.invert_yaxis()
+
 
         hipo_ax[0].set_ylabel("DAYS")
         hipo_fig.legend(
@@ -530,6 +617,27 @@ if PLOT_FINAL_GROUP_FIGURES:
             plot_with_ci(ax, grouped_HIPO_data, ci_HIPO_df, param, "#f7a3a3", "HIPO", show_ci=True)
             ax.set_title(title)
             ax.set_xlabel(xlabel)
+
+            # Define X-axis limits and ticks based on parameter
+            if param == "acrophase_zt":
+                ax.set_xlim(0, 24)
+                ax.set_xticks([0, 6, 12, 18, 24])
+            elif param == "period":
+                ax.set_xlim(22, 26)
+                ax.set_xticks([22, 23, 24, 25, 26])
+            elif param == "mesor" and parameter.lower() == "temp":
+                ax.set_xlim(32, 42)
+                ax.set_xticks([32, 34, 36, 38, 40, 42])
+            elif param == "mesor" and parameter.lower() == "ale":
+                ax.set_xlim(0, 50)
+                ax.set_xticks([0, 12.5, 25, 37.5, 50])
+            elif param == "amplitude" and parameter.lower() == "temp":
+                ax.set_xlim(0, 2)
+                ax.set_xticks([0, 0.5, 1.0, 1.5, 2.0])
+            elif param == "amplitude" and parameter.lower() == "ale":
+                ax.set_xlim(0, 50)
+                ax.set_xticks([0, 10, 20, 30, 40, 50])
+            
             ax.invert_yaxis()
 
         all_ax[0].set_ylabel("DAYS")

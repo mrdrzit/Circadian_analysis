@@ -468,3 +468,13 @@ def infer_total_days_er4000(file_path: str, zt0_time: int, consider_first_day: b
         consider_first_day=consider_first_day,
     )
     return int(len(np.unique(p.days)))
+
+def create_prism_table(dataframe):
+    param_name = dataframe.columns[-1]
+    pivot_df = dataframe.pivot(index="int_day", columns="animal", values=param_name)
+    group_row = dataframe.drop_duplicates("animal")[["animal", "group"]].set_index("animal").T
+    group_row.index = ["Group"]
+    pivot_with_group = pd.concat([group_row, pivot_df])
+    pivot_with_group.reset_index(inplace=True)
+    pivot_with_group.rename(columns={"index": "int_day"}, inplace=True)
+    return pivot_with_group

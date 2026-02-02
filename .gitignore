@@ -2,3 +2,10 @@
 **/__pycache__/
 **/*.py[cod]
 **/*$py.class
+**/*.json
+
+data/raw
+data/exports/figures
+data/exports/prism
+data/exports/tables
+data/derived

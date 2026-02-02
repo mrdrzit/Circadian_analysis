@@ -1,4 +1,4 @@
-from config.analysis_config import COSINOR_CONFIG, COSINOR_DIR, STAGE1_DIR, STAGE2_DIR, RUN_COSINOR, FORCE_COSINOR, SAVE_RAW, SAVE_NORM, NORM_TYPE, NORM_PER_DAY
+from config.analysis_config import COSINOR_CONFIG, COSINOR_DIR, STAGE1_DIR, STAGE2_DIR, RUN_COSINOR, FORCE_COSINOR, SAVE_RAW, SAVE_NORM, NORM_TYPE, NORM_PER_DAY, EXPORTS
 from src.utils.io_utils import load_protocol, experiment_date, filter_protocol
 from circadipy import chrono_rhythm as chrt
 from collections import defaultdict
@@ -126,10 +126,15 @@ if RUN_COSINOR:
     # RAW variant
     RAW_DIR = COSINOR_DIR / "raw"
     RAW_DIR.mkdir(parents=True, exist_ok=True)
+    RAW_TABLES_DIR = EXPORTS / "tables"/ "raw"
+    RAW_TABLES_DIR.mkdir(parents=True, exist_ok=True)
 
     # NORM variant (match your Stage 3 expectation)
     NORM_DIR = COSINOR_DIR / f"norm_{NORM_TYPE}"
     NORM_DIR.mkdir(parents=True, exist_ok=True)
+    NORM_TABLES_DIR = EXPORTS / "tables"/ f"norm_{NORM_TYPE}"
+    NORM_TABLES_DIR.mkdir(parents=True, exist_ok=True)
+
 
     items = [
         (animal, parameter, protocol_raw)
@@ -144,11 +149,12 @@ if RUN_COSINOR:
             safe = animal.replace(" ", "_")
             out_dir = RAW_DIR / f"{safe}_{parameter}"
             out_dir.mkdir(parents=True, exist_ok=True)
-
+            table_dir = RAW_TABLES_DIR/f"{safe}_{parameter}"
+            table_dir.mkdir(parents=True, exist_ok=True)
+    
             try:
-                best_models, _ = chrt.fit_cosinor(protocol_raw, dict=COSINOR_CONFIG)
-                best_models_fixed, _ = chrt.fit_cosinor_fixed_period(protocol_raw, best_models)
-
+                best_models, best_models_file = chrt.fit_cosinor(protocol_raw, dict=COSINOR_CONFIG, save_folder=str(table_dir))
+                best_models_fixed, best_models_fixed_file = chrt.fit_cosinor_fixed_period(protocol_raw, best_models, save_folder=str(table_dir))
                 with open(out_dir / "best_models.pkl", "wb") as f:
                     pickle.dump(best_models, f)
                 with open(out_dir / "best_models_fixed.pkl", "wb") as f:
@@ -162,13 +168,15 @@ if RUN_COSINOR:
             safe = animal.replace(" ", "_")
             out_dir = NORM_DIR / f"{safe}_{parameter}"
             out_dir.mkdir(parents=True, exist_ok=True)
+            table_dir = NORM_TABLES_DIR/f"{safe}_{parameter}"
+            table_dir.mkdir(parents=True, exist_ok=True)
 
             try:
                 protocol_norm = deepcopy(protocol_raw)
                 protocol_norm.normalize_data(type=NORM_TYPE, per_day=NORM_PER_DAY)
 
-                best_models, _ = chrt.fit_cosinor(protocol_norm, dict=COSINOR_CONFIG)
-                best_models_fixed, _ = chrt.fit_cosinor_fixed_period(protocol_norm, best_models)
+                best_models, best_models_file = chrt.fit_cosinor(protocol_norm, dict=COSINOR_CONFIG, save_folder=str(table_dir))
+                best_models_fixed, best_models_fixed_file = chrt.fit_cosinor_fixed_period(protocol_norm, best_models, save_folder=str(table_dir))
 
                 with open(out_dir / "best_models.pkl", "wb") as f:
                     pickle.dump(best_models, f)
